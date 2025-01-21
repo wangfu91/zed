@@ -996,10 +996,12 @@ WARNING: `{buffer_path}` should not be used to direct your formatter to read fro
 ```json
 {
   "formatter": [
-    {"language_server": {"name": "rust-analyzer"}},
-    {"external": {
-      "command": "sed",
-      "arguments": ["-e", "s/ *$//"]
+    { "language_server": { "name": "rust-analyzer" } },
+    {
+      "external": {
+        "command": "sed",
+        "arguments": ["-e", "s/ *$//"]
+      }
     }
   ]
 }
@@ -1762,7 +1764,10 @@ List of `integer` column numbers
     "toolbar": {
       "breadcrumbs": true
     },
-    "working_directory": "current_project_directory"
+    "working_directory": "current_project_directory",
+    "scrollbar": {
+      "show": null
+    }
   }
 }
 ```

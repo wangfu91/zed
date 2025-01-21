@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use assistant_settings::{AssistantDockPosition, AssistantSettings};
 use assistant_tool::ToolWorkingSet;
 use client::zed_urls;
 use fs::Fs;
@@ -17,7 +18,6 @@ use workspace::dock::{DockPosition, Panel, PanelEvent};
 use workspace::Workspace;
 
 use crate::active_thread::ActiveThread;
-use crate::assistant_settings::{AssistantDockPosition, AssistantSettings};
 use crate::message_editor::MessageEditor;
 use crate::thread::{Thread, ThreadError, ThreadId};
 use crate::thread_history::{PastThread, ThreadHistory};
@@ -100,6 +100,16 @@ impl AssistantPanel {
         let workspace = workspace.weak_handle();
         let weak_self = cx.view().downgrade();
 
+        let message_editor = cx.new_view(|cx| {
+            MessageEditor::new(
+                fs.clone(),
+                workspace.clone(),
+                thread_store.downgrade(),
+                thread.clone(),
+                cx,
+            )
+        });
+
         Self {
             active_view: ActiveView::Thread,
             workspace: workspace.clone(),
@@ -109,21 +119,13 @@ impl AssistantPanel {
             thread: cx.new_view(|cx| {
                 ActiveThread::new(
                     thread.clone(),
-                    workspace.clone(),
+                    workspace,
                     language_registry,
                     tools.clone(),
                     cx,
                 )
             }),
-            message_editor: cx.new_view(|cx| {
-                MessageEditor::new(
-                    fs.clone(),
-                    workspace,
-                    thread_store.downgrade(),
-                    thread.clone(),
-                    cx,
-                )
-            }),
+            message_editor,
             tools,
             local_timezone: UtcOffset::from_whole_seconds(
                 chrono::Local::now().offset().local_minus_utc(),
@@ -141,6 +143,11 @@ impl AssistantPanel {
 
     pub(crate) fn thread_store(&self) -> &Model<ThreadStore> {
         &self.thread_store
+    }
+
+    fn cancel(&mut self, _: &editor::actions::Cancel, cx: &mut ViewContext<Self>) {
+        self.thread
+            .update(cx, |thread, cx| thread.cancel_last_completion(cx));
     }
 
     fn new_thread(&mut self, cx: &mut ViewContext<Self>) {
@@ -279,7 +286,12 @@ impl Panel for AssistantPanel {
         Some(proto::PanelId::AssistantPanel)
     }
 
-    fn icon(&self, _cx: &WindowContext) -> Option<IconName> {
+    fn icon(&self, cx: &WindowContext) -> Option<IconName> {
+        let settings = AssistantSettings::get_global(cx);
+        if !settings.enabled || !settings.button {
+            return None;
+        }
+
         Some(IconName::ZedAssistant2)
     }
 
@@ -300,11 +312,12 @@ impl AssistantPanel {
     fn render_toolbar(&self, cx: &mut ViewContext<Self>) -> impl IntoElement {
         let focus_handle = self.focus_handle(cx);
 
-        let title = if self.thread.read(cx).is_empty() {
-            SharedString::from("New Thread")
+        let thread = self.thread.read(cx);
+
+        let title = if thread.is_empty() {
+            thread.summary_or_default(cx)
         } else {
-            self.thread
-                .read(cx)
+            thread
                 .summary(cx)
                 .unwrap_or_else(|| SharedString::from("Loading Summary…"))
         };
@@ -412,13 +425,12 @@ impl AssistantPanel {
                                 .color(Color::Muted),
                         ),
                     )
-                    .child(
-                        v_flex().mx_auto().w_4_5().gap_2().children(
-                            recent_threads
-                                .into_iter()
-                                .map(|thread| PastThread::new(thread, cx.view().downgrade())),
-                        ),
-                    )
+                    .child(v_flex().mx_auto().w_4_5().gap_2().children(
+                        recent_threads.into_iter().map(|thread| {
+                            // TODO: keyboard navigation
+                            PastThread::new(thread, cx.view().downgrade(), false)
+                        }),
+                    ))
                     .child(
                         h_flex().w_full().justify_center().child(
                             Button::new("view-all-past-threads", "View All Past Threads")
@@ -605,6 +617,7 @@ impl Render for AssistantPanel {
             .key_context("AssistantPanel2")
             .justify_between()
             .size_full()
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(|this, _: &NewThread, cx| {
                 this.new_thread(cx);
             }))

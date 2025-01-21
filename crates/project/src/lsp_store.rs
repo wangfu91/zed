@@ -79,7 +79,8 @@ use std::{
 };
 use text::{Anchor, BufferId, LineEnding, OffsetRangeExt};
 use util::{
-    debug_panic, defer, maybe, merge_json_value_into, post_inc, ResultExt, TryFutureExt as _,
+    debug_panic, defer, maybe, merge_json_value_into, paths::SanitizedPath, post_inc, ResultExt,
+    TryFutureExt as _,
 };
 
 pub use fs::*;
@@ -286,9 +287,17 @@ impl LocalLspStore {
 
                         Self::setup_lsp_messages(this.clone(), &language_server, delegate, adapter);
 
+                        let did_change_configuration_params =
+                            Arc::new(lsp::DidChangeConfigurationParams {
+                                settings: workspace_config,
+                            });
                         let language_server = cx
                             .update(|cx| {
-                                language_server.initialize(Some(initialization_params), cx)
+                                language_server.initialize(
+                                    Some(initialization_params),
+                                    did_change_configuration_params.clone(),
+                                    cx,
+                                )
                             })?
                             .await
                             .inspect_err(|_| {
@@ -302,9 +311,7 @@ impl LocalLspStore {
 
                         language_server
                             .notify::<lsp::notification::DidChangeConfiguration>(
-                                lsp::DidChangeConfigurationParams {
-                                    settings: workspace_config,
-                                },
+                                &did_change_configuration_params,
                             )
                             .ok();
 
@@ -818,7 +825,7 @@ impl LocalLspStore {
                     let name = name.to_string();
                     async move {
                         let actions = params.actions.unwrap_or_default();
-                        let (tx, mut rx) = smol::channel::bounded(1);
+                        let (tx, rx) = smol::channel::bounded(1);
                         let request = LanguageServerPromptRequest {
                             level: match params.typ {
                                 lsp::MessageType::ERROR => PromptLevel::Critical,
@@ -837,9 +844,9 @@ impl LocalLspStore {
                             })
                             .is_ok();
                         if did_update {
-                            let response = rx.next().await;
+                            let response = rx.recv().await?;
 
-                            Ok(response)
+                            Ok(Some(response))
                         } else {
                             Ok(None)
                         }
@@ -1820,8 +1827,6 @@ impl LocalLspStore {
                 .then_with(|| a.message.cmp(&b.message))
         }
 
-        let snapshot = self.buffer_snapshot_for_lsp_version(buffer, server_id, version, cx)?;
-
         diagnostics.sort_unstable_by(|a, b| {
             Ordering::Equal
                 .then_with(|| a.range.start.cmp(&b.range.start))
@@ -1829,12 +1834,18 @@ impl LocalLspStore {
                 .then_with(|| compare_diagnostics(&a.diagnostic, &b.diagnostic))
         });
 
+        let snapshot = self.buffer_snapshot_for_lsp_version(buffer, server_id, version, cx)?;
+
+        let edits_since_save = std::cell::LazyCell::new(|| {
+            let saved_version = buffer.read(cx).saved_version();
+            Patch::new(
+                snapshot
+                    .edits_since::<Unclipped<PointUtf16>>(saved_version)
+                    .collect(),
+            )
+        });
+
         let mut sanitized_diagnostics = Vec::new();
-        let edits_since_save = Patch::new(
-            snapshot
-                .edits_since::<Unclipped<PointUtf16>>(buffer.read(cx).saved_version())
-                .collect(),
-        );
         for entry in diagnostics {
             let start;
             let end;
@@ -1842,8 +1853,8 @@ impl LocalLspStore {
                 // Some diagnostics are based on files on disk instead of buffers'
                 // current contents. Adjust these diagnostics' ranges to reflect
                 // any unsaved edits.
-                start = edits_since_save.old_to_new(entry.range.start);
-                end = edits_since_save.old_to_new(entry.range.end);
+                start = (*edits_since_save).old_to_new(entry.range.start);
+                end = (*edits_since_save).old_to_new(entry.range.end);
             } else {
                 start = entry.range.start;
                 end = entry.range.end;
@@ -1922,7 +1933,7 @@ impl LocalLspStore {
             };
 
             server
-                .notify::<lsp::notification::DidOpenTextDocument>(lsp::DidOpenTextDocumentParams {
+                .notify::<lsp::notification::DidOpenTextDocument>(&lsp::DidOpenTextDocumentParams {
                     text_document: lsp::TextDocumentItem::new(
                         uri.clone(),
                         adapter.language_id(&language.name()),
@@ -1968,7 +1979,7 @@ impl LocalLspStore {
             for (_, language_server) in self.language_servers_for_buffer(buffer, cx) {
                 language_server
                     .notify::<lsp::notification::DidCloseTextDocument>(
-                        lsp::DidCloseTextDocumentParams {
+                        &lsp::DidCloseTextDocumentParams {
                             text_document: lsp::TextDocumentIdentifier::new(file_url.clone()),
                         },
                     )
@@ -2006,10 +2017,6 @@ impl LocalLspStore {
             snapshots.retain(|snapshot| snapshot.version + OLD_VERSIONS_TO_RETAIN >= version);
             Ok(found_snapshot)
         } else {
-            match buffer.read(cx).project_path(cx) {
-                Some(project_path) => log::error!("No LSP snapshots found for buffer with path {:?}", project_path.path),
-                None => log::error!("No LSP snapshots found for buffer without a project path (which is also unexpected)"),
-            }
             Ok((buffer.read(cx)).text_snapshot())
         }
     }
@@ -2540,112 +2547,119 @@ impl LocalLspStore {
             let mut found_host = false;
             for worktree in &worktrees {
                 let glob_is_inside_worktree = worktree.update(cx, |tree, _| {
-                    if let Some(worktree_root_path) = tree.abs_path().to_str() {
-                        let path_to_watch = match &watcher.glob_pattern {
-                            lsp::GlobPattern::String(s) => {
-                                match s.strip_prefix(worktree_root_path) {
-                                    Some(relative) => {
-                                        let pattern = relative
-                                            .strip_prefix(std::path::MAIN_SEPARATOR)
-                                            .unwrap_or(relative)
-                                            .to_owned();
-                                        let literal_prefix = glob_literal_prefix(&pattern);
+                    let worktree_root_path = tree.abs_path();
+                    let path_to_watch = match &watcher.glob_pattern {
+                        lsp::GlobPattern::String(s) => {
+                            let watcher_path = SanitizedPath::from(s);
+                            match watcher_path.as_path().strip_prefix(&worktree_root_path) {
+                                Ok(relative) => {
+                                    let pattern = relative.to_string_lossy().to_string();
+                                    let literal_prefix = glob_literal_prefix(relative).into();
 
-                                        let literal_prefix = Arc::from(PathBuf::from(
-                                            literal_prefix
-                                                .strip_prefix(std::path::MAIN_SEPARATOR)
-                                                .unwrap_or(literal_prefix),
-                                        ));
-                                        PathToWatch::Worktree {
-                                            literal_prefix,
-                                            pattern,
-                                        }
-                                    }
-                                    None => {
-                                        let path = glob_literal_prefix(s);
-                                        let glob = &s[path.len()..];
-                                        let pattern = glob
-                                            .strip_prefix(std::path::MAIN_SEPARATOR)
-                                            .unwrap_or(glob)
-                                            .to_owned();
-                                        let path = if Path::new(path).components().next().is_none()
-                                        {
-                                            Arc::from(Path::new(worktree_root_path))
-                                        } else {
-                                            PathBuf::from(path).into()
-                                        };
-
-                                        PathToWatch::Absolute { path, pattern }
+                                    PathToWatch::Worktree {
+                                        literal_prefix,
+                                        pattern,
                                     }
                                 }
-                            }
-                            lsp::GlobPattern::Relative(rp) => {
-                                let Ok(mut base_uri) = match &rp.base_uri {
-                                    lsp::OneOf::Left(workspace_folder) => &workspace_folder.uri,
-                                    lsp::OneOf::Right(base_uri) => base_uri,
-                                }
-                                .to_file_path() else {
-                                    return false;
-                                };
+                                Err(_) => {
+                                    let path = glob_literal_prefix(watcher_path.as_path());
+                                    let pattern = watcher_path
+                                        .as_path()
+                                        .strip_prefix(&path)
+                                        .map(|p| p.to_string_lossy().to_string())
+                                        .unwrap_or_else(|e| {
+                                            debug_panic!(
+                                                "Failed to strip prefix for string pattern: {}, with prefix: {}, with error: {}",
+                                                s,
+                                                path.display(),
+                                                e
+                                            );
+                                            watcher_path.as_path().to_string_lossy().to_string()
+                                        });
+                                    let path = if path.components().next().is_none() {
+                                        worktree_root_path.clone()
+                                    } else {
+                                        path.into()
+                                    };
 
-                                match base_uri.strip_prefix(worktree_root_path) {
-                                    Ok(relative) => {
-                                        let mut literal_prefix = relative.to_owned();
-                                        literal_prefix.push(glob_literal_prefix(&rp.pattern));
-
-                                        PathToWatch::Worktree {
-                                            literal_prefix: literal_prefix.into(),
-                                            pattern: rp.pattern.clone(),
-                                        }
-                                    }
-                                    Err(_) => {
-                                        let path = glob_literal_prefix(&rp.pattern);
-                                        let glob = &rp.pattern[path.len()..];
-                                        let pattern = glob
-                                            .strip_prefix(std::path::MAIN_SEPARATOR)
-                                            .unwrap_or(glob)
-                                            .to_owned();
-                                        base_uri.push(path);
-
-                                        let path = if base_uri.components().next().is_none() {
-                                            Arc::from(Path::new("/"))
-                                        } else {
-                                            base_uri.into()
-                                        };
-                                        PathToWatch::Absolute { path, pattern }
-                                    }
-                                }
-                            }
-                        };
-                        match path_to_watch {
-                            PathToWatch::Worktree {
-                                literal_prefix,
-                                pattern,
-                            } => {
-                                if let Some((tree, glob)) =
-                                    tree.as_local_mut().zip(Glob::new(&pattern).log_err())
-                                {
-                                    tree.add_path_prefix_to_scan(literal_prefix);
-                                    worktree_globs
-                                        .entry(tree.id())
-                                        .or_insert_with(GlobSetBuilder::new)
-                                        .add(glob);
-                                } else {
-                                    return false;
-                                }
-                            }
-                            PathToWatch::Absolute { path, pattern } => {
-                                if let Some(glob) = Glob::new(&pattern).log_err() {
-                                    abs_globs
-                                        .entry(path)
-                                        .or_insert_with(GlobSetBuilder::new)
-                                        .add(glob);
+                                    PathToWatch::Absolute { path, pattern }
                                 }
                             }
                         }
-                        return true;
+                        lsp::GlobPattern::Relative(rp) => {
+                            let Ok(mut base_uri) = match &rp.base_uri {
+                                lsp::OneOf::Left(workspace_folder) => &workspace_folder.uri,
+                                lsp::OneOf::Right(base_uri) => base_uri,
+                            }
+                            .to_file_path() else {
+                                return false;
+                            };
+
+                            match base_uri.strip_prefix(&worktree_root_path) {
+                                Ok(relative) => {
+                                    let mut literal_prefix = relative.to_owned();
+                                    literal_prefix
+                                        .push(glob_literal_prefix(Path::new(&rp.pattern)));
+
+                                    PathToWatch::Worktree {
+                                        literal_prefix: literal_prefix.into(),
+                                        pattern: rp.pattern.clone(),
+                                    }
+                                }
+                                Err(_) => {
+                                    let path = glob_literal_prefix(Path::new(&rp.pattern));
+                                    let pattern = Path::new(&rp.pattern)
+                                        .strip_prefix(&path)
+                                        .map(|p| p.to_string_lossy().to_string())
+                                        .unwrap_or_else(|e| {
+                                            debug_panic!(
+                                                "Failed to strip prefix for relative pattern: {}, with prefix: {}, with error: {}",
+                                                rp.pattern,
+                                                path.display(),
+                                                e
+                                            );
+                                            rp.pattern.clone()
+                                        });
+                                    base_uri.push(path);
+
+                                    let path = if base_uri.components().next().is_none() {
+                                        debug_panic!("base_uri is empty, {}", base_uri.display());
+                                        worktree_root_path.clone()
+                                    } else {
+                                        base_uri.into()
+                                    };
+                                    PathToWatch::Absolute { path, pattern }
+                                }
+                            }
+                        }
+                    };
+                    match path_to_watch {
+                        PathToWatch::Worktree {
+                            literal_prefix,
+                            pattern,
+                        } => {
+                            if let Some((tree, glob)) =
+                                tree.as_local_mut().zip(Glob::new(&pattern).log_err())
+                            {
+                                tree.add_path_prefix_to_scan(literal_prefix);
+                                worktree_globs
+                                    .entry(tree.id())
+                                    .or_insert_with(GlobSetBuilder::new)
+                                    .add(glob);
+                            } else {
+                                return false;
+                            }
+                        }
+                        PathToWatch::Absolute { path, pattern } => {
+                            if let Some(glob) = Glob::new(&pattern).log_err() {
+                                abs_globs
+                                    .entry(path)
+                                    .or_insert_with(GlobSetBuilder::new)
+                                    .add(glob);
+                            }
+                        }
                     }
-                    false
+                    true
                 });
                 if glob_is_inside_worktree {
                     log::trace!(
@@ -3500,24 +3514,30 @@ impl LspStore {
         };
         let file = File::from_dyn(buffer.file()).and_then(File::as_local);
         if let (Some(file), Some(language_server)) = (file, language_server) {
-            let lsp_params = match request.to_lsp(&file.abs_path(cx), buffer, &language_server, cx)
-            {
-                Ok(lsp_params) => lsp_params,
+            let lsp_params = match request.to_lsp_params_or_response(
+                &file.abs_path(cx),
+                buffer,
+                &language_server,
+                cx,
+            ) {
+                Ok(LspParamsOrResponse::Params(lsp_params)) => lsp_params,
+                Ok(LspParamsOrResponse::Response(response)) => return Task::ready(Ok(response)),
                 Err(err) => {
-                    log::error!(
-                        "Preparing LSP request to {} failed: {}",
+                    let message = format!(
+                        "{} via {} failed: {}",
+                        request.display_name(),
                         language_server.name(),
                         err
                     );
-                    return Task::ready(Err(err));
+                    log::warn!("{}", message);
+                    return Task::ready(Err(anyhow!(message)));
                 }
             };
             let status = request.status();
+            if !request.check_capabilities(language_server.adapter_server_capabilities()) {
+                return Task::ready(Ok(Default::default()));
+            }
             return cx.spawn(move |this, cx| async move {
-                if !request.check_capabilities(language_server.adapter_server_capabilities()) {
-                    return Ok(Default::default());
-                }
-
                 let lsp_request = language_server.request::<R::LspRequest>(lsp_params);
 
                 let id = lsp_request.id();
@@ -3560,8 +3580,14 @@ impl LspStore {
                 let result = lsp_request.await;
 
                 let response = result.map_err(|err| {
-                    log::warn!("LSP request to {} failed: {}", language_server.name(), err);
-                    err
+                    let message = format!(
+                        "{} via {} failed: {}",
+                        request.display_name(),
+                        language_server.name(),
+                        err
+                    );
+                    log::warn!("{}", message);
+                    anyhow!(message)
                 })?;
 
                 let response = request
@@ -4404,7 +4430,8 @@ impl LspStore {
             Documentation::Undocumented
         } else if response.documentation_is_markdown {
             Documentation::MultiLineMarkdown(
-                markdown::parse_markdown(&response.documentation, &language_registry, None).await,
+                markdown::parse_markdown(&response.documentation, Some(&language_registry), None)
+                    .await,
             )
         } else if response.documentation.lines().count() <= 1 {
             Documentation::SingleLine(response.documentation)
@@ -5056,7 +5083,7 @@ impl LspStore {
 
             language_server
                 .notify::<lsp::notification::DidChangeTextDocument>(
-                    lsp::DidChangeTextDocumentParams {
+                    &lsp::DidChangeTextDocumentParams {
                         text_document: lsp::VersionedTextDocumentIdentifier::new(
                             uri.clone(),
                             next_version,
@@ -5092,7 +5119,7 @@ impl LspStore {
                 };
                 server
                     .notify::<lsp::notification::DidSaveTextDocument>(
-                        lsp::DidSaveTextDocumentParams {
+                        &lsp::DidSaveTextDocumentParams {
                             text_document: text_document.clone(),
                             text,
                         },
@@ -5162,7 +5189,7 @@ impl LspStore {
 
                 server
                     .notify::<lsp::notification::DidChangeConfiguration>(
-                        lsp::DidChangeConfigurationParams { settings },
+                        &lsp::DidChangeConfigurationParams { settings },
                     )
                     .ok();
             }
@@ -6203,7 +6230,7 @@ impl LspStore {
 
                 if filter.should_send_did_rename(&old_uri, is_dir) {
                     language_server
-                        .notify::<DidRenameFiles>(RenameFilesParams {
+                        .notify::<DidRenameFiles>(&RenameFilesParams {
                             files: vec![FileRename {
                                 old_uri: old_uri.clone(),
                                 new_uri: new_uri.clone(),
@@ -6310,7 +6337,7 @@ impl LspStore {
             if !changes.is_empty() {
                 server
                     .notify::<lsp::notification::DidChangeWatchedFiles>(
-                        lsp::DidChangeWatchedFilesParams { changes },
+                        &lsp::DidChangeWatchedFilesParams { changes },
                     )
                     .log_err();
             }
@@ -7522,7 +7549,7 @@ impl LspStore {
                     let uri = lsp::Url::from_file_path(file.abs_path(cx)).unwrap();
                     language_server
                         .notify::<lsp::notification::DidOpenTextDocument>(
-                            lsp::DidOpenTextDocumentParams {
+                            &lsp::DidOpenTextDocumentParams {
                                 text_document: lsp::TextDocumentItem::new(
                                     uri,
                                     adapter.language_id(&language.name()),
@@ -7627,7 +7654,7 @@ impl LspStore {
                     if progress.is_cancellable {
                         server
                             .notify::<lsp::notification::WorkDoneProgressCancel>(
-                                WorkDoneProgressCancelParams {
+                                &WorkDoneProgressCancelParams {
                                     token: lsp::NumberOrString::String(token.clone()),
                                 },
                             )
@@ -7637,7 +7664,7 @@ impl LspStore {
                     if progress.is_cancellable {
                         server
                             .notify::<lsp::notification::WorkDoneProgressCancel>(
-                                WorkDoneProgressCancelParams {
+                                &WorkDoneProgressCancelParams {
                                     token: lsp::NumberOrString::String(token.clone()),
                                 },
                             )
@@ -7772,7 +7799,7 @@ impl LspStore {
                     };
                     if !params.changes.is_empty() {
                         server
-                            .notify::<lsp::notification::DidChangeWatchedFiles>(params)
+                            .notify::<lsp::notification::DidChangeWatchedFiles>(&params)
                             .log_err();
                     }
                 }
@@ -8300,23 +8327,13 @@ impl DiagnosticSummary {
     }
 }
 
-fn glob_literal_prefix(glob: &str) -> &str {
-    let is_absolute = glob.starts_with(path::MAIN_SEPARATOR);
-
-    let mut literal_end = is_absolute as usize;
-    for (i, part) in glob.split(path::MAIN_SEPARATOR).enumerate() {
-        if part.contains(['*', '?', '{', '}']) {
-            break;
-        } else {
-            if i > 0 {
-                // Account for separator prior to this part
-                literal_end += path::MAIN_SEPARATOR.len_utf8();
-            }
-            literal_end += part.len();
-        }
-    }
-    let literal_end = literal_end.min(glob.len());
-    &glob[..literal_end]
+fn glob_literal_prefix(glob: &Path) -> PathBuf {
+    glob.components()
+        .take_while(|component| match component {
+            path::Component::Normal(part) => !part.to_string_lossy().contains(['*', '?', '{', '}']),
+            _ => true,
+        })
+        .collect()
 }
 
 pub struct SshLspAdapter {
@@ -8696,8 +8713,34 @@ fn include_text(server: &lsp::LanguageServer) -> Option<bool> {
 #[cfg(test)]
 #[test]
 fn test_glob_literal_prefix() {
-    assert_eq!(glob_literal_prefix("**/*.js"), "");
-    assert_eq!(glob_literal_prefix("node_modules/**/*.js"), "node_modules");
-    assert_eq!(glob_literal_prefix("foo/{bar,baz}.js"), "foo");
-    assert_eq!(glob_literal_prefix("foo/bar/baz.js"), "foo/bar/baz.js");
+    assert_eq!(glob_literal_prefix(Path::new("**/*.js")), Path::new(""));
+    assert_eq!(
+        glob_literal_prefix(Path::new("node_modules/**/*.js")),
+        Path::new("node_modules")
+    );
+    assert_eq!(
+        glob_literal_prefix(Path::new("foo/{bar,baz}.js")),
+        Path::new("foo")
+    );
+    assert_eq!(
+        glob_literal_prefix(Path::new("foo/bar/baz.js")),
+        Path::new("foo/bar/baz.js")
+    );
+
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(glob_literal_prefix(Path::new("**\\*.js")), Path::new(""));
+        assert_eq!(
+            glob_literal_prefix(Path::new("node_modules\\**/*.js")),
+            Path::new("node_modules")
+        );
+        assert_eq!(
+            glob_literal_prefix(Path::new("foo/{bar,baz}.js")),
+            Path::new("foo")
+        );
+        assert_eq!(
+            glob_literal_prefix(Path::new("foo\\bar\\baz.js")),
+            Path::new("foo/bar/baz.js")
+        );
+    }
 }
