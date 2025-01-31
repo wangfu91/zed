@@ -1281,7 +1281,7 @@ struct PendingCompletion {
     _task: Task<()>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub enum DataCollectionChoice {
     NotAnswered,
     Enabled,
@@ -1320,6 +1320,7 @@ pub struct ZetaInlineCompletionProvider {
     data_collection: Option<ProviderDataCollection>,
 }
 
+#[derive(Debug)]
 pub struct ProviderDataCollection {
     workspace: WeakEntity<Workspace>,
     worktree_root_path: PathBuf,
@@ -1610,7 +1611,7 @@ impl inline_completion::InlineCompletionProvider for ZetaInlineCompletionProvide
                             .show_close_button(false)
                             .with_click_message("Turn On")
                             .on_click({
-                                let this = this.clone();
+                                let (this, zeta) = (this.clone(), zeta.clone());
                                 move |_window, cx| {
                                     this.update(cx, |this, cx| {
                                         this.set_data_collection_choice(
@@ -1618,10 +1619,16 @@ impl inline_completion::InlineCompletionProvider for ZetaInlineCompletionProvide
                                             cx,
                                         )
                                     });
+                                    zeta.update(cx, |zeta, cx| {
+                                        zeta.update_data_collection_preference_for_project(
+                                            abs_path, true, cx,
+                                        );
+
                                 }
                             })
                             .with_secondary_click_message("Turn Off")
                             .on_secondary_click({
+                                let (this, zeta) = (this.clone(), zeta.clone());
                                 move |_window, cx| {
                                     this.update(cx, |this, cx| {
                                         this.set_data_collection_choice(
@@ -1633,7 +1640,6 @@ impl inline_completion::InlineCompletionProvider for ZetaInlineCompletionProvide
                             })
                             .with_tertiary_click_message("Never Ask Again")
                             .on_tertiary_click({
-                                let zeta = zeta.clone();
                                 move |_window, cx| {
                                     zeta.update(cx, |zeta, cx| {
                                         zeta.set_never_ask_again_for_data_collection(cx);
