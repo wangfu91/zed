@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -euxo pipefail
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 <release_version>"
+  exit 1
+fi
+
+mkdir -p snap
+RELEASE_VERSION="$1" envsubst < crates/zed/resources/snap/snapcraft.yaml.in > snap/snapcraft.yaml
+
+# Clean seems to be needed to actually check that the snapcraft.yaml
+# works.  For example, when a `stage-package` is removed, it will
+# still remain on rebuild.
+snapcraft clean
+
+snapcraft
