@@ -777,7 +777,10 @@ impl OutlinePanel {
                                 excerpt.invalidate_outlines();
                             }
                         }
-                        outline_panel.update_non_fs_items(window, cx);
+                        let update_cached_items = outline_panel.update_non_fs_items(window, cx);
+                        if update_cached_items {
+                            outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
+                        }
                     } else if &outline_panel_settings != new_settings {
                         outline_panel_settings = *new_settings;
                         cx.notify();
@@ -2896,8 +2899,8 @@ impl OutlinePanel {
                     outline_panel.fs_entries = new_fs_entries;
                     outline_panel.fs_entries_depth = new_depth_map;
                     outline_panel.fs_children_count = new_children_count;
-                    outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
                     outline_panel.update_non_fs_items(window, cx);
+                    outline_panel.update_cached_entries(debounce, window, cx);
 
                     cx.notify();
                 })
@@ -2922,7 +2925,11 @@ impl OutlinePanel {
              window: &mut Window,
              cx: &mut Context<Self>| {
                 if matches!(e, SearchEvent::MatchesInvalidated) {
-                    outline_panel.update_search_matches(window, cx);
+                    let update_cached_items = outline_panel.update_search_matches(window, cx);
+                    if update_cached_items {
+                        outline_panel.selected_entry.invalidate();
+                        outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
+                    }
                 };
                 outline_panel.autoscroll(cx);
             },
@@ -3181,10 +3188,11 @@ impl OutlinePanel {
         Some(closest_container)
     }
 
-    fn fetch_outdated_outlines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn fetch_outdated_outlines(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut update_cached_items = false;
         let excerpt_fetch_ranges = self.excerpt_fetch_ranges(cx);
         if excerpt_fetch_ranges.is_empty() {
-            return;
+            return update_cached_items;
         }
 
         let syntax_theme = cx.theme().syntax().clone();
@@ -3208,7 +3216,7 @@ impl OutlinePanel {
                             })
                             .await;
                         outline_panel
-                            .update_in(&mut cx, |outline_panel, window, cx| {
+                            .update_in(&mut cx, |outline_panel, _, _| {
                                 if let Some(excerpt) = outline_panel
                                     .excerpts
                                     .entry(buffer_id)
@@ -3217,17 +3225,15 @@ impl OutlinePanel {
                                 {
                                     excerpt.outlines = ExcerptOutlines::Outlines(fetched_outlines);
                                 }
-                                outline_panel.update_cached_entries(
-                                    Some(UPDATE_DEBOUNCE),
-                                    window,
-                                    cx,
-                                );
+                                // TODO kb this is happening in the task, too late
+                                update_cached_items = true;
                             })
                             .ok();
                     }),
                 );
             }
         }
+        update_cached_items
     }
 
     fn is_singleton_active(&self, cx: &App) -> bool {
@@ -3915,19 +3921,27 @@ impl OutlinePanel {
         !self.collapsed_entries.contains(&entry_to_check)
     }
 
-    fn update_non_fs_items(&mut self, window: &mut Window, cx: &mut Context<OutlinePanel>) {
+    fn update_non_fs_items(&mut self, window: &mut Window, cx: &mut Context<OutlinePanel>) -> bool {
         if !self.active {
-            return;
+            return false;
         }
 
-        self.update_search_matches(window, cx);
-        self.fetch_outdated_outlines(window, cx);
-        self.autoscroll(cx);
+        let mut update_cached_items = false;
+        update_cached_items |= self.fetch_outdated_outlines(window, cx);
+        update_cached_items |= self.update_search_matches(window, cx);
+        if update_cached_items {
+            self.selected_entry.invalidate();
+        }
+        update_cached_items
     }
 
-    fn update_search_matches(&mut self, window: &mut Window, cx: &mut Context<OutlinePanel>) {
+    fn update_search_matches(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<OutlinePanel>,
+    ) -> bool {
         if !self.active {
-            return;
+            return false;
         }
 
         let project_search = self
@@ -4010,10 +4024,7 @@ impl OutlinePanel {
                 cx,
             ));
         }
-        if update_cached_entries {
-            self.selected_entry.invalidate();
-            self.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
-        }
+        update_cached_entries
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4995,11 +5006,17 @@ fn subscribe_for_editor_events(
                 }
                 EditorEvent::ExcerptsExpanded { ids } => {
                     outline_panel.invalidate_outlines(ids);
-                    outline_panel.update_non_fs_items(window, cx);
+                    let update_cached_items = outline_panel.update_non_fs_items(window, cx);
+                    if update_cached_items {
+                        outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
+                    }
                 }
                 EditorEvent::ExcerptsEdited { ids } => {
                     outline_panel.invalidate_outlines(ids);
-                    outline_panel.update_non_fs_items(window, cx);
+                    let update_cached_items = outline_panel.update_non_fs_items(window, cx);
+                    if update_cached_items {
+                        outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
+                    }
                 }
                 EditorEvent::BufferFoldToggled { ids, .. } => {
                     outline_panel.invalidate_outlines(ids);
@@ -5073,7 +5090,10 @@ fn subscribe_for_editor_events(
                             excerpt.invalidate_outlines();
                         }
                     }
-                    outline_panel.update_non_fs_items(window, cx);
+                    let update_cached_items = outline_panel.update_non_fs_items(window, cx);
+                    if update_cached_items {
+                        outline_panel.update_cached_entries(Some(UPDATE_DEBOUNCE), window, cx);
+                    }
                 }
                 _ => {}
             }
