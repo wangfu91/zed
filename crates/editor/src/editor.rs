@@ -2594,7 +2594,9 @@ impl Editor {
         // First cancel hides anything that may open without a specific action.
         dismissed = dismissed || hide_hover(self, cx);
         dismissed = dismissed || self.hide_signature_help(cx, SignatureHelpHiddenBy::Escape);
-        dismissed = dismissed || self.discard_inline_completion(reason == Cancel, cx);
+        if reason == Cancel {
+            dismissed = dismissed || self.discard_inline_completion(true, cx);
+        }
         if dismissed && reason == Cancel {
             return true;
         }
