@@ -482,6 +482,11 @@ impl Platform for WindowsPlatform {
     // todo(windows)
     fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
 
+    fn add_recent_document(&self, _path: &Path) {
+        // Add a document to the recent Windows Jump List.
+        
+    }
+
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
         self.state.borrow_mut().callbacks.app_menu_action = Some(callback);
     }
