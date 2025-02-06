@@ -30,6 +30,8 @@ use windows::{
 
 use crate::{platform::blade::BladeContext, *};
 
+use super::jump_list;
+
 pub(crate) struct WindowsPlatform {
     state: RefCell<WindowsPlatformState>,
     raw_window_handles: RwLock<SmallVec<[HWND; 4]>>,
@@ -482,9 +484,9 @@ impl Platform for WindowsPlatform {
     // todo(windows)
     fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
 
-    fn add_recent_document(&self, _path: &Path) {
+    fn add_recent_document(&self, path: &Path) {
         // Add a document to the recent Windows Jump List.
-        
+        jump_list::add_to_jump_list(path).log_err();
     }
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
