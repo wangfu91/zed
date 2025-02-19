@@ -484,9 +484,14 @@ impl Platform for WindowsPlatform {
     // todo(windows)
     fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
 
-    fn add_recent_document(&self, path: &Path) {
-        // Add a document to the recent Windows Jump List.
-        jump_list::add_to_jump_list(path).log_err();
+    fn add_recent_document(&self, path: &Path) {}
+
+    fn add_recent_documents(&self, paths: &[PathBuf]) {
+        jump_list::update_jump_list(paths).log_err();
+    }
+
+    fn clear_recent_documents(&self) {
+        // TODO:
     }
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {
