@@ -125,8 +125,8 @@ fn update_jump_list(state: &mut JumpListState) -> anyhow::Result<()> {
 
     if num_recent_items > 0 {
         let recent_array: IObjectArray = recent_items.cast()?;
-        // TOOD: i18n for "Recent"
-        unsafe { jump_list.AppendCategory(w!("Recent"), &recent_array)? };
+        // TOOD: i18n for "Recent Folders"
+        unsafe { jump_list.AppendCategory(w!("Recent Folders"), &recent_array)? };
     }
 
     unsafe {
