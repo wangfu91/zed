@@ -495,7 +495,7 @@ impl Platform for WindowsPlatform {
     }
 
     fn add_recent_documents(&self, paths: &[PathBuf]) {
-        jump_list::update_jump_list(paths).log_err();
+        jump_list::update_recent_items(paths).log_err();
     }
 
     fn clear_recent_documents(&self) {
