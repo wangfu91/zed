@@ -1438,7 +1438,6 @@ impl App {
     /// The list is usually shown on the application icon's context menu in the dock,
     /// and allows to open the recent files via that context menu.
     pub fn add_recent_documents(&self, paths: &[PathBuf]) {
-        log::info!("==== Adding recent documents: {:?}", paths);
         self.platform.add_recent_documents(paths);
     }
 
