@@ -888,13 +888,16 @@ impl Workspace {
                     this.update_window_title(window, cx);
                     this.serialize_workspace(window, cx);
 
+                    log::info!("====== [Workspace.new] Worktree added or removed");
+
                     cx.spawn(|workspace, mut cx| async move {
                         workspace
                             .update(&mut cx, |workspace, cx| {
-                                workspace.refresh_recent_documents(cx);
-                            })
-                            .log_err();
-                    });
+                                workspace.refresh_recent_documents(cx)
+                            })?
+                            .await
+                    })
+                    .detach_and_log_err(cx);
                 }
 
                 project::Event::DisconnectedFromHost => {
@@ -1305,8 +1308,10 @@ impl Workspace {
 
             window
                 .update(&mut cx, |workspace, window, cx| {
-                    log::info!("Activating window");
-                    workspace.refresh_recent_documents(cx).log_err();
+                    log::info!("====== [workspace.new_local] Activating window");
+                    workspace
+                        .refresh_recent_documents(cx)
+                        .detach_and_log_err(cx);
                     window.activate_window()
                 })
                 .log_err();
@@ -4680,6 +4685,10 @@ impl Workspace {
                 .sorted_by_key(|(_, id)| *id)
                 .map(|(path, _)| path)
                 .collect::<Vec<_>>();
+            log::info!(
+                "====== [refresh_recent_documents] recent documents: {:?}",
+                current_paths
+            );
             cx.update(|cx| {
                 cx.clear_recent_documents();
                 cx.add_recent_documents(&current_paths);

@@ -1,6 +1,7 @@
 use crate::{Action, App, Platform, SharedString};
 use util::ResultExt;
 
+#[derive(Debug)]
 /// A menu of the application, either a main menu or a submenu
 pub struct Menu {
     /// The name of the menu
@@ -20,6 +21,7 @@ impl Menu {
     }
 }
 
+#[derive(Debug)]
 /// The different kinds of items that can be in a menu
 pub enum MenuItem {
     /// A separator between items
@@ -150,7 +152,7 @@ impl Clone for OwnedMenuItem {
 /// OS actions are actions that are recognized by the operating system
 /// This allows the operating system to provide specialized behavior for
 /// these actions
-#[derive(Copy, Clone, Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum OsAction {
     /// The 'cut' action
     Cut,

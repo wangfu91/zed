@@ -482,16 +482,24 @@ impl Platform for WindowsPlatform {
     }
 
     // todo(windows)
-    fn set_dock_menu(&self, _menus: Vec<MenuItem>, _keymap: &Keymap) {}
+    fn set_dock_menu(&self, menus: Vec<MenuItem>, _keymap: &Keymap) {
+        log::info!("====== [set_dock_menu] setting dock menu: {:?}", menus);
+        jump_list::add_tasks(menus).log_err();
+    }
 
-    fn add_recent_document(&self, path: &Path) {}
+    fn add_recent_document(&self, path: &Path) {
+        log::info!(
+            "====== [add_recent_document] adding recent document: {}",
+            path.display()
+        );
+    }
 
     fn add_recent_documents(&self, paths: &[PathBuf]) {
         jump_list::update_jump_list(paths).log_err();
     }
 
     fn clear_recent_documents(&self) {
-        // TODO:
+        log::info!("====== [clear_recent_documents] clearing recent documents");
     }
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {

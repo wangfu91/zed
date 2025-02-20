@@ -554,7 +554,10 @@ impl RecentProjectsDelegate {
                     }
                 }
                 let updated_paths = unique_added_paths.into_keys().collect::<Vec<_>>();
-                log::info!("====== Updated paths: {:?}", updated_paths);
+                log::info!(
+                    "====== [delete_recent_project] Updated paths: {:?}",
+                    updated_paths
+                );
                 this.update_in(&mut cx, move |picker, window, cx| {
                     cx.clear_recent_documents();
                     cx.add_recent_documents(&updated_paths);

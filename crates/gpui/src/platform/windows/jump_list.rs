@@ -11,7 +11,9 @@ use windows::Win32::{
         ShellLink,
     },
 };
-use windows_core::{w, Interface, BSTR, HSTRING, PROPVARIANT, PWSTR};
+use windows_core::{w, Interface, HSTRING, PROPVARIANT, PWSTR};
+
+use crate::MenuItem;
 
 pub(crate) fn update_jump_list(paths: &[PathBuf]) -> anyhow::Result<()> {
     log::info!("========= Updating jump list with {:?}", paths);
@@ -33,6 +35,7 @@ pub(crate) fn update_jump_list(paths: &[PathBuf]) -> anyhow::Result<()> {
         for i in 0..removed_destinations.GetCount()? {
             let removed_link: IShellLinkW = removed_destinations.GetAt(i)?;
             removed_link.GetArguments(&mut destination_path)?;
+            log::info!("====== removed_path={:?}", destination_path);
             let removed_path_wstr = PWSTR::from_raw(destination_path.as_mut_ptr());
             if !removed_path_wstr.is_null() {
                 let removed_path = removed_path_wstr.to_string()?;
@@ -45,37 +48,88 @@ pub(crate) fn update_jump_list(paths: &[PathBuf]) -> anyhow::Result<()> {
         unsafe { CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)? };
 
     for path in recent {
-        let path_wstr: HSTRING = HSTRING::from(&path);
-        let exe_wstr: HSTRING = std::env::current_exe()?.as_os_str().into();
-        let dir_wstr: HSTRING = Path::new(&path)
+        let current_exe = std::env::current_exe()?;
+        let dir_name = Path::new(&path)
             .file_name()
             .ok_or(anyhow!("path is not a directory"))?
-            .into();
-        let dir_wstr = BSTR::from_wide(dir_wstr.as_wide())?;
+            .to_str()
+            .ok_or(anyhow!("path is not a valid unicode string"))?;
 
         unsafe {
-            let link = create_directory_link(exe_wstr, path_wstr, dir_wstr)?;
+            let link = create_shell_link(
+                current_exe.as_path(),
+                path.as_str(),
+                path.as_str(),
+                dir_name,
+                &Path::new("explorer.exe"),
+                0,
+            )?;
             items.AddObject(&link)?;
         }
     }
 
     let array: IObjectArray = items.cast()?;
-    unsafe { jump_list.AppendCategory(w!("Recent"), &array)? };
+    unsafe { jump_list.AppendCategory(w!("Recent1"), &array)? };
     unsafe { jump_list.CommitList()? };
 
     Ok(())
 }
 
-unsafe fn create_directory_link(
-    exec_path: HSTRING,
-    args: HSTRING,
-    title: BSTR,
+pub(crate) fn add_tasks(menu_items: Vec<MenuItem>) -> anyhow::Result<()> {
+    let jump_list: ICustomDestinationList =
+        unsafe { CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)? };
+
+    let items: IObjectCollection =
+        unsafe { CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)? };
+
+    let current_exe = std::env::current_exe()?;
+
+    for menu_item in menu_items {
+        if let MenuItem::Action { name, action, .. } = menu_item {
+            log::info!(
+                "Adding task to jump list: name={:?}, action={:?}",
+                name,
+                action
+            );
+
+            unsafe {
+                let link = create_shell_link(
+                    current_exe.as_path(),
+                    "",
+                    action.name(),
+                    name.to_string().as_str(),
+                    &current_exe.as_path(),
+                    0,
+                )?;
+                items.AddObject(&link)?;
+            }
+        }
+    }
+
+    let array: IObjectArray = items.cast()?;
+    let mut slots_visible: u32 = 0;
+    let _removed: IObjectArray = unsafe { jump_list.BeginList(&mut slots_visible)? };
+    log::info!("slots_visible={}", slots_visible);
+    //unsafe { jump_list.AppendCategory(w!("Tasks"), &array)? };
+    unsafe { jump_list.AddUserTasks(&array)? };
+    unsafe { jump_list.CommitList()? };
+
+    Ok(())
+}
+
+unsafe fn create_shell_link(
+    program: &Path,
+    args: &str,
+    desc: &str,
+    title: &str,
+    icon_path: &Path,
+    icon_index: i32,
 ) -> anyhow::Result<IShellLinkW> {
     let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
-    link.SetPath(&exec_path)?;
-    link.SetIconLocation(w!("explorer.exe"), 0)?; // // simulate folder icon
-    link.SetArguments(&args)?; // folder path
-    link.SetDescription(&args)?; // tooltip
+    link.SetPath(&HSTRING::from(program))?;
+    link.SetIconLocation(&HSTRING::from(icon_path), icon_index)?;
+    link.SetArguments(&HSTRING::from(args))?; // path
+    link.SetDescription(&HSTRING::from(desc))?; // tooltip
 
     // the actual display string must be set as a property because IShellLink is primarily for shortcuts
     let title_value = PROPVARIANT::from(title);
