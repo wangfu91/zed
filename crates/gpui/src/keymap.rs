@@ -11,11 +11,11 @@ use std::any::TypeId;
 
 /// An opaque identifier of which version of the keymap is currently active.
 /// The keymap's version is changed whenever bindings are added or removed.
-#[derive(Copy, Clone, Eq, PartialEq, Default, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Default)]
 pub struct KeymapVersion(usize);
 
 /// A collection of key bindings for the user's application.
-#[derive(Default, Debug)]
+#[derive(Default)]
 pub struct Keymap {
     bindings: Vec<KeyBinding>,
     binding_indices_by_action_id: HashMap<TypeId, SmallVec<[usize; 3]>>,

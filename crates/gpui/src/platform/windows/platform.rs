@@ -491,7 +491,6 @@ impl Platform for WindowsPlatform {
         jump_list::update_recent_items(paths).log_err();
     }
 
-    // todo(windows)
     fn clear_recent_documents(&self) {}
 
     fn on_app_menu_action(&self, callback: Box<dyn FnMut(&dyn Action)>) {

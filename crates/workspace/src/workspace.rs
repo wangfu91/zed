@@ -888,8 +888,6 @@ impl Workspace {
                     this.update_window_title(window, cx);
                     this.serialize_workspace(window, cx);
 
-                    log::info!("====== [Workspace.new] Worktree added or removed");
-
                     cx.spawn(|workspace, mut cx| async move {
                         workspace
                             .update(&mut cx, |workspace, cx| {
@@ -1308,7 +1306,6 @@ impl Workspace {
 
             window
                 .update(&mut cx, |workspace, window, cx| {
-                    log::info!("====== [workspace.new_local] Activating window");
                     workspace
                         .refresh_recent_documents(cx)
                         .detach_and_log_err(cx);
@@ -4680,15 +4677,7 @@ impl Workspace {
                     unique_paths.insert(path.clone(), id);
                 }
             }
-            let current_paths = unique_paths
-                .into_iter()
-                .sorted_by_key(|(_, id)| *id)
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>();
-            log::info!(
-                "====== [refresh_recent_documents] recent documents: {:?}",
-                current_paths
-            );
+            let current_paths = unique_paths.into_keys().collect::<Vec<_>>();
             cx.update(|cx| {
                 cx.clear_recent_documents();
                 cx.add_recent_documents(&current_paths);

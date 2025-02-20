@@ -888,9 +888,6 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn add_recent_documents(&self, paths: &[PathBuf]) {}
-    fn clear_recent_documents(&self) {}
-
     fn path_for_auxiliary_executable(&self, name: &str) -> Result<PathBuf> {
         unsafe {
             let bundle: id = NSBundle::mainBundle();
